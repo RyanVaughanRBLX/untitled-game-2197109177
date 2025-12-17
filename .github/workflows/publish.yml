@@ -1,0 +1,102 @@
+name: Build and Publish to Roblox
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install Aftman
+        uses: ok-nick/setup-aftman@v0.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Install tools via Aftman
+        id: aftman-install
+        run: aftman install
+      
+      - name: Download Roblox type definitions
+        run: |
+          curl -L -o globalTypes.d.luau https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/main/scripts/globalTypes.d.luau
+      
+      - name: Generate sourcemap
+        run: rojo sourcemap default.project.json --output sourcemap.json
+      
+      - name: Run Selene (Linting)
+        id: lint
+        run: selene src/
+      
+      - name: Check formatting with StyLua
+        id: format
+        run: stylua --check src/
+      
+      - name: Run Luau type checking
+        id: typecheck
+        run: luau-lsp analyze --sourcemap=sourcemap.json --ignore="**/*.spec.luau" --definitions=globalTypes.d.luau src/
+        continue-on-error: true
+  
+  build-and-publish:
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install Aftman
+        uses: ok-nick/setup-aftman@v0.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Install tools via Aftman
+        run: aftman install
+      
+      - name: Generate sourcemap
+        run: rojo sourcemap default.project.json --output sourcemap.json
+      
+      - name: Build place file
+        run: rojo build default.project.json --output place.rbxl
+      
+      - name: Upload place file as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: place-file
+          path: place.rbxl
+          retention-days: 7
+      
+      - name: Publish to Roblox
+        env:
+          ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
+          ROBLOX_UNIVERSE_ID: ${{ secrets.ROBLOX_UNIVERSE_ID }}
+          ROBLOX_PLACE_ID: ${{ secrets.ROBLOX_PLACE_ID }}
+        run: |
+          # Upload the place file using Roblox Open Cloud API
+          curl -X POST \
+            "https://apis.sitetest1.robloxlabs.com/universes/v1/$ROBLOX_UNIVERSE_ID/places/$ROBLOX_PLACE_ID/versions?versionType=Published" \
+            -H "x-api-key: $ROBLOX_API_KEY" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @place.rbxl \
+            -w "\nHTTP Status: %{http_code}\n" \
+            -o response.json
+          
+          # Check if the upload was successful
+          HTTP_CODE=$(tail -n 1 response.json | grep -oP '\d+$')
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Failed to publish to Roblox. Response:"
+            cat response.json
+            exit 1
+          fi
+          
+          echo "Successfully published to Roblox!"
+          cat response.json
+
